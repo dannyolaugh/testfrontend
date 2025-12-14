@@ -96,10 +96,21 @@ struct CitationRow: View {
                     .font(.system(size: 14, weight: .medium))
                     .foregroundColor(AppTheme.textPrimary)
                 
-                Text(citation.url)
-                    .font(.system(size: 12))
-                    .foregroundColor(AppTheme.slackBlue)
-                    .lineLimit(1)
+                // Make the URL clickable
+                if let url = URL(string: citation.url) {
+                    Link(destination: url) {
+                        Text(citation.url)
+                            .font(.system(size: 12))
+                            .foregroundColor(AppTheme.slackBlue)
+                            .underline()
+                            .lineLimit(1)
+                    }
+                } else {
+                    Text(citation.url)
+                        .font(.system(size: 12))
+                        .foregroundColor(AppTheme.slackBlue)
+                        .lineLimit(1)
+                }
                 
                 if let snippet = citation.snippet {
                     Text(snippet)

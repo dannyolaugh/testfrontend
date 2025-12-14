@@ -3,16 +3,16 @@ import Messages
 
 class MessageHelper {
     
+    // MARK: - Text Messages
+    
     static func createMessage(response: AIResponse, conversation: MSConversation) -> MSMessage {
         let message = MSMessage()
         
-        // Create layout
         let layout = MSMessageTemplateLayout()
         layout.image = createCardImage(response: response)
         layout.caption = "\(response.model.displayName) • \(response.citations.count) source\(response.citations.count == 1 ? "" : "s")"
         
-        // Encode response data into URL
-        if let url = encodeResponseToURL(response: response) {
+        if let url = encodeTextResponseToURL(response: response) {
             message.url = url
         }
         
@@ -20,7 +20,27 @@ class MessageHelper {
         return message
     }
     
-    static func encodeResponseToURL(response: AIResponse) -> URL? {
+    // MARK: - Image Messages
+    
+    static func createImageMessage(imageResponse: ImageResponse, image: UIImage, conversation: MSConversation) -> MSMessage {
+        let message = MSMessage()
+        
+        let layout = MSMessageTemplateLayout()
+        layout.image = image
+        layout.caption = "\(imageResponse.model.displayName) • Generated Image"
+        
+        // Use a simple URL with just metadata, no image data
+        if let url = encodeImageResponseToURL(imageResponse: imageResponse) {
+            message.url = url
+        }
+        
+        message.layout = layout
+        return message
+    }
+    
+    // MARK: - Encoding
+    
+    static func encodeTextResponseToURL(response: AIResponse) -> URL? {
         var components = URLComponents()
         components.scheme = "https"
         components.host = "aiassistant.app"
@@ -30,6 +50,7 @@ class MessageHelper {
         let citationsString = citationsJSON?.base64EncodedString()
         
         components.queryItems = [
+            URLQueryItem(name: "type", value: "text"),
             URLQueryItem(name: "text", value: response.text),
             URLQueryItem(name: "model", value: response.model.rawValue),
             URLQueryItem(name: "citations", value: citationsString),
@@ -39,12 +60,60 @@ class MessageHelper {
         return components.url
     }
     
-    static func decodeResponseFromURL(url: URL) -> AIResponse? {
+    static func encodeImageResponseToURL(imageResponse: ImageResponse) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "aiassistant.app"
+        components.path = "/response"
+        
+        // Don't encode image data - just metadata
+        components.queryItems = [
+            URLQueryItem(name: "type", value: "image"),
+            URLQueryItem(name: "prompt", value: imageResponse.prompt),
+            URLQueryItem(name: "model", value: imageResponse.model.rawValue),
+            URLQueryItem(name: "timestamp", value: String(imageResponse.timestamp))
+        ]
+        
+        return components.url
+    }
+    
+    // MARK: - Decoding
+    
+    static func decodeResponseFromURL(url: URL) -> UnifiedResponse? {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let queryItems = components.queryItems else {
             return nil
         }
         
+        var typeString: String?
+        
+        for item in queryItems {
+            if item.name == "type" {
+                typeString = item.value
+                break
+            }
+        }
+        
+        guard let typeStr = typeString else { return nil }
+        
+        if typeStr == "text" {
+            return decodeTextResponse(from: queryItems)
+        } else if typeStr == "image" {
+            return decodeImageResponse(from: queryItems)
+        }
+        
+        return nil
+    }
+    
+    static func decodeImageFromMessage(message: MSMessage) -> UIImage? {
+        // Try to get image from the message layout
+        if let layout = message.layout as? MSMessageTemplateLayout {
+            return layout.image
+        }
+        return nil
+    }
+    
+    private static func decodeTextResponse(from queryItems: [URLQueryItem]) -> UnifiedResponse? {
         var text: String?
         var modelRaw: String?
         var citationsString: String?
@@ -79,18 +148,56 @@ class MessageHelper {
             citations = (try? JSONDecoder().decode([Citation].self, from: data)) ?? []
         }
         
-        return AIResponse(
+        let aiResponse = AIResponse(
             text: text,
             citations: citations,
             model: model,
             timestamp: timestamp
         )
+        
+        return UnifiedResponse(textResponse: aiResponse)
     }
     
-    static func createCardImage(response: AIResponse) -> UIImage? {
-        print("🖼️ Creating card image for response")
+    private static func decodeImageResponse(from queryItems: [URLQueryItem]) -> UnifiedResponse? {
+        var prompt: String?
+        var modelRaw: String?
+        var timestamp: TimeInterval = Date().timeIntervalSince1970
         
-        // Card dimensions matching the preview style
+        for item in queryItems {
+            switch item.name {
+            case "prompt":
+                prompt = item.value
+            case "model":
+                modelRaw = item.value
+            case "timestamp":
+                if let value = item.value, let ts = TimeInterval(value) {
+                    timestamp = ts
+                }
+            default:
+                break
+            }
+        }
+        
+        guard let prompt = prompt,
+              let modelRaw = modelRaw,
+              let model = ImageModel(rawValue: modelRaw) else {
+            return nil
+        }
+        
+        let imageResponse = ImageResponse(
+            imageUrl: "mock://placeholder",
+            prompt: prompt,
+            model: model,
+            timestamp: timestamp
+        )
+        
+        // Return without image data - we'll get it from the message layout
+        return UnifiedResponse(imageResponse: imageResponse, imageData: nil)
+    }
+    
+    // MARK: - Card Image Generation (for text responses)
+    
+    static func createCardImage(response: AIResponse) -> UIImage? {
         let width: CGFloat = 340
         let height: CGFloat = 220
         let size = CGSize(width: width, height: height)
@@ -100,11 +207,9 @@ class MessageHelper {
         let image = renderer.image { context in
             let ctx = context.cgContext
             
-            // Background - clean white
             UIColor.white.setFill()
             ctx.fill(CGRect(origin: .zero, size: size))
             
-            // Border - subtle gray
             let borderColor = UIColor(red: 0.87, green: 0.87, blue: 0.87, alpha: 1.0)
             borderColor.setStroke()
             ctx.setLineWidth(1.0)
@@ -112,11 +217,8 @@ class MessageHelper {
             ctx.stroke(borderRect)
             
             let padding: CGFloat = 16
-            
-            // Header section
             let headerY: CGFloat = padding
             
-            // Model icon
             let iconSize: CGFloat = 14
             let iconAttributes: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 14),
@@ -124,7 +226,6 @@ class MessageHelper {
             let iconText = response.model.icon as NSString
             iconText.draw(at: CGPoint(x: padding, y: headerY), withAttributes: iconAttributes)
             
-            // Model name
             let modelColor = getModelUIColor(for: response.model)
             let modelNameAttributes: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 13, weight: .semibold),
@@ -133,7 +234,6 @@ class MessageHelper {
             let modelNameText = response.model.displayName as NSString
             modelNameText.draw(at: CGPoint(x: padding + iconSize + 6, y: headerY + 1), withAttributes: modelNameAttributes)
             
-            // Citation count (top right)
             if !response.citations.isEmpty {
                 let citationText = "\(response.citations.count)" as NSString
                 let citationAttributes: [NSAttributedString.Key: Any] = [
@@ -142,7 +242,6 @@ class MessageHelper {
                 ]
                 let citationSize = citationText.size(withAttributes: citationAttributes)
                 
-                // Link icon
                 let linkIconAttributes: [NSAttributedString.Key: Any] = [
                     .font: UIFont.systemFont(ofSize: 10),
                     .foregroundColor: UIColor(red: 0.45, green: 0.45, blue: 0.45, alpha: 1.0)
@@ -155,24 +254,18 @@ class MessageHelper {
                 citationText.draw(at: CGPoint(x: rightX + linkSize.width + 4, y: headerY + 1), withAttributes: citationAttributes)
             }
             
-            // Response text - convert markdown to attributed string
             let textY = headerY + 28
             let textHeight = height - textY - padding - 50
             let textRect = CGRect(x: padding, y: textY, width: width - (padding * 2), height: textHeight + 25)
             
             let truncatedText = truncateText(response.text, maxHeight: textHeight + 25, width: width - (padding * 2))
-            
-            // Convert markdown to attributed string
             let attributedText = convertMarkdownToAttributedString(truncatedText, fontSize: 14)
-            
             attributedText.draw(in: textRect)
             
-            // Bottom divider line
             let dividerY = height - padding - 25
             UIColor(red: 0.95, green: 0.95, blue: 0.95, alpha: 1.0).setFill()
             ctx.fill(CGRect(x: padding, y: dividerY, width: width - (padding * 2), height: 1))
             
-            // "Tap to view full response" footer
             let footerY = dividerY + 8
             let footerAttributes: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 12),
@@ -212,7 +305,6 @@ class MessageHelper {
         var attributesWithParagraph = testAttributes
         attributesWithParagraph[.paragraphStyle] = paragraphStyle
         
-        // Test if full text fits
         let fullSize = (text as NSString).boundingRect(
             with: CGSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin],
@@ -224,7 +316,6 @@ class MessageHelper {
             return text
         }
         
-        // Truncate to fit
         var truncated = text
         while truncated.count > 0 {
             truncated = String(truncated.dropLast(10)) + "..."
@@ -254,30 +345,18 @@ class MessageHelper {
             .paragraphStyle: paragraphStyle
         ]
         
-        // Process the text to remove all markdown syntax
         var processedText = text
         
-        // Remove headers (with spaces after them)
         processedText = processedText.replacingOccurrences(of: "### ", with: "")
         processedText = processedText.replacingOccurrences(of: "## ", with: "")
         processedText = processedText.replacingOccurrences(of: "# ", with: "")
-        
-        // Also remove without spaces (edge case)
         processedText = processedText.replacingOccurrences(of: "###", with: "")
         processedText = processedText.replacingOccurrences(of: "##", with: "")
         processedText = processedText.replacingOccurrences(of: "#", with: "")
-        
-        // Remove bold markers
         processedText = processedText.replacingOccurrences(of: "**", with: "")
         processedText = processedText.replacingOccurrences(of: "__", with: "")
-        
-        // Remove italic markers (single * or _)
-        // Be careful with bullet points that use -
         processedText = processedText.replacingOccurrences(of: "*", with: "")
         processedText = processedText.replacingOccurrences(of: "_", with: "")
-        
-        print("📝 Original text: \(text.prefix(100))")
-        print("📝 Processed text: \(processedText.prefix(100))")
         
         let attributedString = NSAttributedString(string: processedText, attributes: baseAttributes)
         

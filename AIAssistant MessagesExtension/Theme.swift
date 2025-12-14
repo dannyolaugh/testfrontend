@@ -23,6 +23,24 @@ struct AppTheme {
         case .perplexity: return slackPurple
         }
     }
+    
+    // Image Model Colors
+    static func imageModelColor(for model: ImageModel) -> Color {
+        switch model {
+        case .dalle: return Color(red: 0.82, green: 0.53, blue: 0.38)
+        case .midjourney: return slackPurple
+        case .stableDiffusion: return slackYellow
+        case .flux: return slackBlue
+        }
+    }
+    
+    // Generation Mode Colors
+    static func modeColor(for mode: GenerationMode) -> Color {
+        switch mode {
+        case .text: return slackGreen
+        case .image: return slackPurple
+        }
+    }
 }
 
 // Clean card style

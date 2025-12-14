@@ -11,31 +11,16 @@ class MessagesViewController: MSMessagesAppViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         print("📱 viewDidLoad")
-        // Don't automatically setup view - let willBecomeActive or didSelect handle it
-        // This prevents the issue where viewDidLoad is called after didSelect
     }
     
     override func willBecomeActive(with conversation: MSConversation) {
         super.willBecomeActive(with: conversation)
         print("📱 willBecomeActive - selectedMessage: \(conversation.selectedMessage != nil)")
-        print("📱 willBecomeActive - hostingController: \(hostingController != nil), detailController: \(detailController != nil)")
-        print("📱 willBecomeActive - view.subviews.count: \(view.subviews.count), children.count: \(children.count)")
         
-        // If there's a selected message, show its detail
-        if let message = conversation.selectedMessage,
-           let url = message.url,
-           let response = MessageHelper.decodeResponseFromURL(url: url) {
-            print("📱 Found selected message, showing detail")
-            showResponseDetailView(for: response)
-            return
-        }
-        
-        // Only setup view if we don't have any controller at all AND no child view controllers
-        if hostingController == nil && detailController == nil && children.isEmpty {
+        // Only setup main view if we don't have any controller
+        if hostingController == nil && detailController == nil {
             print("📱 No controllers found, setting up main view")
             setupView()
-        } else {
-            print("📱 Controller exists or has children, skipping setup")
         }
     }
     
@@ -43,20 +28,29 @@ class MessagesViewController: MSMessagesAppViewController {
         print("📱 didSelect called")
         
         guard let url = message.url,
-              let response = MessageHelper.decodeResponseFromURL(url: url) else {
+              let unifiedResponse = MessageHelper.decodeResponseFromURL(url: url) else {
             print("❌ Failed to decode message URL")
             return
         }
         
         print("✅ Decoded response, showing detail view")
-        // Always show the detail view when a message is tapped
-        showResponseDetailView(for: response)
+        
+        // For image responses, also get the image from the message layout
+        if unifiedResponse.type == .image,
+           let image = MessageHelper.decodeImageFromMessage(message: message),
+           let imageResponse = unifiedResponse.imageResponse {
+            let imageData = image.jpegData(compressionQuality: 1.0)
+            let updatedResponse = UnifiedResponse(imageResponse: imageResponse, imageData: imageData)
+            showDetailView(for: updatedResponse, conversation: conversation)
+        } else {
+            showDetailView(for: unifiedResponse, conversation: conversation)
+        }
     }
     
-    private func showResponseDetailView(for response: AIResponse) {
-        print("📱 showResponseDetailView called")
+    private func showDetailView(for unifiedResponse: UnifiedResponse, conversation: MSConversation) {
+        print("📱 showDetailView called for type: \(unifiedResponse.type)")
         
-        // Clear main view if it exists
+        // Clear BOTH controllers before showing detail
         if let existing = hostingController {
             print("📱 Clearing existing main view controller")
             existing.view.removeFromSuperview()
@@ -64,7 +58,6 @@ class MessagesViewController: MSMessagesAppViewController {
             hostingController = nil
         }
         
-        // Clear old detail view if it exists
         if let existing = detailController {
             print("📱 Clearing existing detail view controller")
             existing.view.removeFromSuperview()
@@ -72,22 +65,25 @@ class MessagesViewController: MSMessagesAppViewController {
             detailController = nil
         }
         
-        print("📱 Creating new detail view")
+        let detailView: AnyView
         
-        // Create detail view
-        let detailView = ResponseDetailView(response: response, onDismiss: { [weak self] in
-            print("📱 Detail view onDismiss called")
-            // Clear detail controller
-            self?.detailController?.view.removeFromSuperview()
-            self?.detailController?.removeFromParent()
-            self?.detailController = nil
-            
-            // Recreate the main view
-            print("📱 Recreating main view after dismiss")
-            self?.setupView()
-        })
+        if unifiedResponse.type == .text, let textResponse = unifiedResponse.textResponse {
+            detailView = AnyView(ResponseDetailView(response: textResponse, onDismiss: { [weak self] in
+                self?.dismissDetailView(conversation: conversation)
+            }))
+        } else if unifiedResponse.type == .image,
+                  let imageResponse = unifiedResponse.imageResponse,
+                  let imageData = unifiedResponse.imageData,
+                  let image = UIImage(data: imageData) {
+            detailView = AnyView(ImageDetailView(imageResponse: imageResponse, image: image, onDismiss: { [weak self] in
+                self?.dismissDetailView(conversation: conversation)
+            }))
+        } else {
+            print("❌ Invalid unified response")
+            return
+        }
         
-        let controller = UIHostingController(rootView: AnyView(detailView))
+        let controller = UIHostingController(rootView: detailView)
         controller.view.backgroundColor = .white
         
         addChild(controller)
@@ -96,15 +92,40 @@ class MessagesViewController: MSMessagesAppViewController {
         view.addSubview(controller.view)
         controller.didMove(toParent: self)
         
-        // Track the detail controller
         self.detailController = controller
         print("📱 Detail controller set and displayed")
     }
     
+    private func dismissDetailView(conversation: MSConversation) {
+        print("📱 Detail view onDismiss called")
+        
+        // Clear detail controller
+        detailController?.view.removeFromSuperview()
+        detailController?.removeFromParent()
+        detailController = nil
+        
+        // IMPORTANT: Deselect the message so it can be tapped again
+        if let selectedMessage = conversation.selectedMessage {
+            print("📱 Deselecting message")
+            // Create a copy of the message without selection
+            let newMessage = MSMessage(session: selectedMessage.session ?? MSSession())
+            conversation.send(newMessage) { error in
+                if let error = error {
+                    print("❌ Error deselecting: \(error)")
+                }
+            }
+        }
+        
+        // Recreate the main view so user sees the AI Assistant
+        setupView()
+        
+        print("📱 Requesting compact presentation style")
+        shouldStayExpanded = false
+        requestPresentationStyle(.compact)
+    }
+    
     override func willTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
-        // If we want to stay expanded, block any compact transition
         if shouldStayExpanded && presentationStyle == .compact {
-            // Don't call super - this prevents the transition
             return
         }
         
@@ -122,16 +143,17 @@ class MessagesViewController: MSMessagesAppViewController {
         print("📱 Creating main view")
         
         let mainView = MainView(
-            onSend: { [weak self] response in
-                self?.sendMessage(response: response)
+            onSendText: { [weak self] response in
+                self?.sendTextMessage(response: response)
+            },
+            onSendImage: { [weak self] imageResponse, image in
+                self?.sendImageMessage(imageResponse: imageResponse, image: image)
             },
             onQuerySubmitted: { [weak self] in
-                // Mark that we want to stay expanded when query is submitted
                 self?.shouldStayExpanded = true
                 self?.requestPresentationStyle(.expanded)
             },
             onResponseReceived: { [weak self] in
-                // Keep staying expanded after response
                 self?.shouldStayExpanded = true
             }
         )
@@ -148,10 +170,9 @@ class MessagesViewController: MSMessagesAppViewController {
         self.hostingController = controller
     }
     
-    private func sendMessage(response: AIResponse) {
+    private func sendTextMessage(response: AIResponse) {
         guard let conversation = activeConversation else { return }
         
-        // First, send the rich message card
         let richMessage = MessageHelper.createMessage(response: response, conversation: conversation)
         
         conversation.insert(richMessage) { error in
@@ -160,7 +181,6 @@ class MessagesViewController: MSMessagesAppViewController {
             } else {
                 print("✅ Rich message card sent successfully")
                 
-                // Then, send the plain text message
                 let plainText = "\(response.model.displayName): \(response.text)"
                 conversation.insertText(plainText) { textError in
                     if let textError = textError {
@@ -172,25 +192,60 @@ class MessagesViewController: MSMessagesAppViewController {
             }
         }
         
-        // Now we can allow collapsing
+        self.shouldStayExpanded = false
+        self.requestPresentationStyle(.compact)
+    }
+    
+    private func sendImageMessage(imageResponse: ImageResponse, image: UIImage) {
+        guard let conversation = activeConversation else { return }
+        
+        print("🖼️ Sending image message")
+        
+        // Create the rich message card with the image (no image data in URL)
+        let message = MessageHelper.createImageMessage(imageResponse: imageResponse, image: image, conversation: conversation)
+        
+        // Insert the rich message
+        conversation.insert(message) { error in
+            if let error = error {
+                print("❌ Error inserting image message: \(error)")
+            } else {
+                print("✅ Image message card sent successfully")
+                
+                // Also insert text describing the image so it appears in the text field
+                let imageDescription = "🎨 \(imageResponse.model.displayName) generated: \(imageResponse.prompt)"
+                conversation.insertText(imageDescription) { textError in
+                    if let textError = textError {
+                        print("❌ Error sending image description text: \(textError)")
+                    } else {
+                        print("✅ Image description text sent successfully")
+                    }
+                }
+            }
+        }
+        
         self.shouldStayExpanded = false
         self.requestPresentationStyle(.compact)
     }
 }
 
-// MARK: - Main View (Single Unified View)
+// MARK: - Main View
 
 struct MainView: View {
+    @State private var generationMode: GenerationMode = .text
     @State private var question: String = ""
-    @State private var selectedModel: AIModel = .claude
-    @State private var response: AIResponse?
+    @State private var selectedTextModel: AIModel = .claude
+    @State private var selectedImageModel: ImageModel = .dalle
+    @State private var textResponse: AIResponse?
+    @State private var imageResponse: ImageResponse?
+    @State private var generatedImage: UIImage?
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var showingDetail = false
     @State private var detailResponse: AIResponse?
     @FocusState private var isInputFocused: Bool
     
-    let onSend: (AIResponse) -> Void
+    let onSendText: (AIResponse) -> Void
+    let onSendImage: (ImageResponse, UIImage) -> Void
     let onQuerySubmitted: () -> Void
     let onResponseReceived: () -> Void
     
@@ -202,7 +257,7 @@ struct MainView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                // Simple header
+                // Header
                 HStack {
                     Image(systemName: "sparkles")
                         .font(.system(size: 16, weight: .semibold))
@@ -227,22 +282,38 @@ struct MainView: View {
                 // Content
                 ScrollView {
                     VStack(spacing: 16) {
-                        ModelSelectionView(selectedModel: $selectedModel)
+                        // Generation Mode Selector
+                        GenerationModeSelector(selectedMode: $generationMode)
+                            .onChange(of: generationMode) { _ in
+                                textResponse = nil
+                                imageResponse = nil
+                                generatedImage = nil
+                            }
+                        
+                        // Model Selection
+                        if generationMode == .text {
+                            ModelSelectionView(selectedModel: $selectedTextModel)
+                        } else {
+                            ImageModelSelectionView(selectedModel: $selectedImageModel)
+                        }
                         
                         // Input Area
                         VStack(spacing: 12) {
                             HStack(alignment: .top, spacing: 12) {
-                                TextField("Ask a question...", text: $question, axis: .vertical)
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 15))
-                                    .lineLimit(1...6)
-                                    .focused($isInputFocused)
-                                    .onChange(of: isInputFocused) { focused in
-                                        if focused {
-                                            // Expand view when keyboard appears
-                                            onQuerySubmitted()
-                                        }
+                                TextField(
+                                    generationMode == .text ? "Ask a question..." : "Describe the image you want...",
+                                    text: $question,
+                                    axis: .vertical
+                                )
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 15))
+                                .lineLimit(1...6)
+                                .focused($isInputFocused)
+                                .onChange(of: isInputFocused) { focused in
+                                    if focused {
+                                        onQuerySubmitted()
                                     }
+                                }
                                 
                                 if !question.isEmpty {
                                     Button(action: { question = "" }) {
@@ -257,7 +328,10 @@ struct MainView: View {
                             .cornerRadius(8)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .stroke(isInputFocused ? AppTheme.modelColor(for: selectedModel) : AppTheme.border, lineWidth: isInputFocused ? 2 : 1)
+                                    .stroke(
+                                        isInputFocused ? AppTheme.modeColor(for: generationMode) : AppTheme.border,
+                                        lineWidth: isInputFocused ? 2 : 1
+                                    )
                             )
                             
                             HStack(spacing: 8) {
@@ -265,7 +339,7 @@ struct MainView: View {
                                     HStack(spacing: 8) {
                                         ProgressView()
                                             .scaleEffect(0.8)
-                                        Text("Thinking...")
+                                        Text(generationMode == .text ? "Thinking..." : "Generating...")
                                             .font(.system(size: 13))
                                             .foregroundColor(AppTheme.textSecondary)
                                     }
@@ -273,14 +347,22 @@ struct MainView: View {
                                 
                                 Spacer()
                                 
-                                Button(action: askAI) {
-                                    Text("Send")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 20)
-                                        .padding(.vertical, 8)
-                                        .background(question.isEmpty || isLoading ? AppTheme.textSecondary.opacity(0.3) : AppTheme.modelColor(for: selectedModel))
-                                        .cornerRadius(6)
+                                Button(action: generateContent) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: generationMode.icon)
+                                            .font(.system(size: 12))
+                                        Text("Generate")
+                                            .font(.system(size: 14, weight: .semibold))
+                                    }
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 20)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        question.isEmpty || isLoading
+                                            ? AppTheme.textSecondary.opacity(0.3)
+                                            : AppTheme.modeColor(for: generationMode)
+                                    )
+                                    .cornerRadius(6)
                                 }
                                 .disabled(question.isEmpty || isLoading)
                             }
@@ -316,17 +398,32 @@ struct MainView: View {
                             )
                         }
                         
-                        // Response Card - scrollable
-                        if let response = response {
+                        // Response Cards
+                        if let response = textResponse {
                             SimpleResponseCard(
                                 response: response,
                                 availableHeight: geometry.size.height - 350,
                                 onSend: {
-                                    onSend(response)
-                                    self.response = nil
+                                    onSendText(response)
+                                    self.textResponse = nil
                                 },
                                 onViewFull: {
                                     showDetailView(for: response)
+                                }
+                            )
+                        }
+                        
+                        if let imageResp = imageResponse {
+                            ImageResponseCard(
+                                imageResponse: imageResp,
+                                image: generatedImage,
+                                availableHeight: geometry.size.height - 350,
+                                onSend: {
+                                    if let img = generatedImage {
+                                        onSendImage(imageResp, img)
+                                        self.imageResponse = nil
+                                        self.generatedImage = nil
+                                    }
                                 }
                             )
                         }
@@ -350,32 +447,55 @@ struct MainView: View {
         }
     }
     
-    private func askAI() {
+    private func generateContent() {
         isLoading = true
         errorMessage = nil
-        
-        // Just dismiss keyboard - view is already expanded from when keyboard appeared
         isInputFocused = false
         
-        Task {
-            do {
-                let result = try await APIService.askAI(
-                    question: question,
-                    model: selectedModel,
-                    userId: UIDevice.current.identifierForVendor?.uuidString
-                )
+        if generationMode == .text {
+            Task {
+                do {
+                    let result = try await APIService.askAI(
+                        question: question,
+                        model: selectedTextModel,
+                        userId: UIDevice.current.identifierForVendor?.uuidString
+                    )
+                    
+                    await MainActor.run {
+                        self.textResponse = result
+                        self.isLoading = false
+                        self.question = ""
+                        onResponseReceived()
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.errorMessage = "Couldn't get a response. Please try again."
+                        self.isLoading = false
+                    }
+                }
+            }
+        } else {
+            Task {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
                 
                 await MainActor.run {
-                    self.response = result
+                    let imgResponse = ImageResponse(
+                        imageUrl: "mock://placeholder",
+                        prompt: question,
+                        model: selectedImageModel,
+                        timestamp: Date().timeIntervalSince1970
+                    )
+                    
+                    let mockImage = MockImageGenerator.generatePlaceholderImage(
+                        prompt: question,
+                        model: selectedImageModel
+                    )
+                    
+                    self.imageResponse = imgResponse
+                    self.generatedImage = mockImage
                     self.isLoading = false
                     self.question = ""
-                    // Keep staying expanded after response
                     onResponseReceived()
-                }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = "Couldn't get a response. Please try again."
-                    self.isLoading = false
                 }
             }
         }
@@ -390,14 +510,12 @@ struct SimpleResponseCard: View {
     let onSend: () -> Void
     let onViewFull: () -> Void
     
-    // Calculate responsive height based on available space
     private var cardHeight: CGFloat {
         min(max(availableHeight * 0.6, 150), 400)
     }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Header
             HStack {
                 HStack(spacing: 6) {
                     Text(response.model.icon)
@@ -421,7 +539,6 @@ struct SimpleResponseCard: View {
                 }
             }
             
-            // Scrollable Response Text with Markdown
             ScrollView(.vertical, showsIndicators: true) {
                 MarkdownText(response.text, fontSize: 14, lineSpacing: 3)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -429,10 +546,8 @@ struct SimpleResponseCard: View {
             }
             .frame(height: cardHeight)
             
-            // Action buttons
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
-                    // Copy button
                     Button(action: {
                         UIPasteboard.general.string = response.text
                     }) {
@@ -453,7 +568,6 @@ struct SimpleResponseCard: View {
                         )
                     }
                     
-                    // View full button - show if there are citations
                     if !response.citations.isEmpty {
                         Button(action: onViewFull) {
                             HStack {
@@ -475,7 +589,6 @@ struct SimpleResponseCard: View {
                     }
                 }
                 
-                // Send button
                 Button(action: onSend) {
                     HStack {
                         Image(systemName: "paperplane.fill")
