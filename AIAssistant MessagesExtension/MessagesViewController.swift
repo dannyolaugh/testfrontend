@@ -475,27 +475,41 @@ struct MainView: View {
                 }
             }
         } else {
+            // Real image generation with DALL-E 3
             Task {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                
-                await MainActor.run {
-                    let imgResponse = ImageResponse(
-                        imageUrl: "mock://placeholder",
+                do {
+                    print("🎨 Starting real image generation with DALL-E 3")
+                    
+                    // Call the API to generate the image
+                    let imgResponse = try await APIService.generateImage(
                         prompt: question,
-                        model: selectedImageModel,
-                        timestamp: Date().timeIntervalSince1970
+                        userId: UIDevice.current.identifierForVendor?.uuidString
                     )
                     
-                    let mockImage = MockImageGenerator.generatePlaceholderImage(
-                        prompt: question,
-                        model: selectedImageModel
-                    )
+                    print("✅ Image generation API call successful, imageUrl: \(imgResponse.imageUrl)")
                     
-                    self.imageResponse = imgResponse
-                    self.generatedImage = mockImage
-                    self.isLoading = false
-                    self.question = ""
-                    onResponseReceived()
+                    // Download the generated image
+                    let imageData = try await APIService.downloadImage(from: imgResponse.imageUrl)
+                    
+                    guard let image = UIImage(data: imageData) else {
+                        throw APIError.decodingError
+                    }
+                    
+                    print("✅ Image downloaded and converted to UIImage")
+                    
+                    await MainActor.run {
+                        self.imageResponse = imgResponse
+                        self.generatedImage = image
+                        self.isLoading = false
+                        self.question = ""
+                        onResponseReceived()
+                    }
+                } catch {
+                    print("❌ Image generation failed: \(error)")
+                    await MainActor.run {
+                        self.errorMessage = "Couldn't generate image. Please try again."
+                        self.isLoading = false
+                    }
                 }
             }
         }

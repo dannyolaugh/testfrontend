@@ -84,21 +84,6 @@ class MockImageGenerator {
                 UIColor(red: 0.82, green: 0.53, blue: 0.38, alpha: 1.0),
                 UIColor(red: 0.92, green: 0.63, blue: 0.48, alpha: 1.0)
             )
-        case .midjourney:
-            return (
-                UIColor(red: 0.29, green: 0.13, blue: 0.48, alpha: 1.0),
-                UIColor(red: 0.49, green: 0.33, blue: 0.68, alpha: 1.0)
-            )
-        case .stableDiffusion:
-            return (
-                UIColor(red: 0.93, green: 0.70, blue: 0.13, alpha: 1.0),
-                UIColor(red: 1.0, green: 0.80, blue: 0.33, alpha: 1.0)
-            )
-        case .flux:
-            return (
-                UIColor(red: 0.22, green: 0.45, blue: 0.69, alpha: 1.0),
-                UIColor(red: 0.42, green: 0.65, blue: 0.89, alpha: 1.0)
-            )
         }
     }
 }
