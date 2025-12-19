@@ -24,6 +24,11 @@ class MessagesViewController: MSMessagesAppViewController {
         }
     }
     
+    override func didBecomeActive(with conversation: MSConversation) {
+        super.didBecomeActive(with: conversation)
+        // Don't do anything here that would trigger message insertion
+    }
+    
     override func didSelect(_ message: MSMessage, conversation: MSConversation) {
         print("📱 didSelect called")
         
@@ -35,16 +40,46 @@ class MessagesViewController: MSMessagesAppViewController {
         
         print("✅ Decoded response, showing detail view")
         
-        // For image responses, also get the image from the message layout
+        // For image responses, get the image from the message layout first
+        // Then download from URL if needed
         if unifiedResponse.type == .image,
-           let image = MessageHelper.decodeImageFromMessage(message: message),
            let imageResponse = unifiedResponse.imageResponse {
-            let imageData = image.jpegData(compressionQuality: 1.0)
-            let updatedResponse = UnifiedResponse(imageResponse: imageResponse, imageData: imageData)
-            showDetailView(for: updatedResponse, conversation: conversation)
+            
+            // First try to get image from message layout
+            if let layoutImage = MessageHelper.decodeImageFromMessage(message: message) {
+                let imageData = layoutImage.jpegData(compressionQuality: 1.0)
+                let updatedResponse = UnifiedResponse(imageResponse: imageResponse, imageData: imageData)
+                showDetailView(for: updatedResponse, conversation: conversation)
+            } else if imageResponse.imageUrl != "mock://placeholder" {
+                // If no layout image but we have a URL, download it
+                print("📥 Downloading image from URL: \(imageResponse.imageUrl)")
+                Task {
+                    do {
+                        let imageData = try await APIService.downloadImage(from: imageResponse.imageUrl)
+                        let updatedResponse = UnifiedResponse(imageResponse: imageResponse, imageData: imageData)
+                        
+                        await MainActor.run {
+                            self.showDetailView(for: updatedResponse, conversation: conversation)
+                        }
+                    } catch {
+                        print("❌ Failed to download image: \(error)")
+                        await MainActor.run {
+                            // Show error or fallback
+                            self.showImageLoadError()
+                        }
+                    }
+                }
+            } else {
+                print("❌ No image data available")
+            }
         } else {
             showDetailView(for: unifiedResponse, conversation: conversation)
         }
+    }
+    
+    private func showImageLoadError() {
+        // You could show an alert here
+        print("⚠️ Unable to load image")
     }
     
     private func showDetailView(for unifiedResponse: UnifiedResponse, conversation: MSConversation) {
@@ -104,19 +139,8 @@ class MessagesViewController: MSMessagesAppViewController {
         detailController?.removeFromParent()
         detailController = nil
         
-        // IMPORTANT: Deselect the message so it can be tapped again
-        if let selectedMessage = conversation.selectedMessage {
-            print("📱 Deselecting message")
-            // Create a copy of the message without selection
-            let newMessage = MSMessage(session: selectedMessage.session ?? MSSession())
-            conversation.send(newMessage) { error in
-                if let error = error {
-                    print("❌ Error deselecting: \(error)")
-                }
-            }
-        }
-        
-        // Recreate the main view so user sees the AI Assistant
+        // Don't try to deselect the message as it can cause issues
+        // Just recreate the main view
         setupView()
         
         print("📱 Requesting compact presentation style")
@@ -175,12 +199,14 @@ class MessagesViewController: MSMessagesAppViewController {
         
         let richMessage = MessageHelper.createMessage(response: response, conversation: conversation)
         
+        // Insert the message properly
         conversation.insert(richMessage) { error in
             if let error = error {
                 print("❌ Error inserting rich message: \(error)")
             } else {
                 print("✅ Rich message card sent successfully")
                 
+                // Also send plain text version
                 let plainText = "\(response.model.displayName): \(response.text)"
                 conversation.insertText(plainText) { textError in
                     if let textError = textError {
@@ -201,7 +227,7 @@ class MessagesViewController: MSMessagesAppViewController {
         
         print("🖼️ Sending image message")
         
-        // Create the rich message card with the image (no image data in URL)
+        // Create the rich message card with the image (now includes imageUrl in URL)
         let message = MessageHelper.createImageMessage(imageResponse: imageResponse, image: image, conversation: conversation)
         
         // Insert the rich message

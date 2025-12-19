@@ -29,7 +29,7 @@ class MessageHelper {
         layout.image = image
         layout.caption = "\(imageResponse.model.displayName) • Generated Image"
         
-        // Use a simple URL with just metadata, no image data
+        // Include imageUrl in the URL so we can retrieve it when tapped
         if let url = encodeImageResponseToURL(imageResponse: imageResponse) {
             message.url = url
         }
@@ -66,9 +66,10 @@ class MessageHelper {
         components.host = "aiassistant.app"
         components.path = "/response"
         
-        // Don't encode image data - just metadata
+        // Include imageUrl so we can download it when the message is tapped
         components.queryItems = [
             URLQueryItem(name: "type", value: "image"),
+            URLQueryItem(name: "imageUrl", value: imageResponse.imageUrl),
             URLQueryItem(name: "prompt", value: imageResponse.prompt),
             URLQueryItem(name: "model", value: imageResponse.model.rawValue),
             URLQueryItem(name: "timestamp", value: String(imageResponse.timestamp))
@@ -159,12 +160,15 @@ class MessageHelper {
     }
     
     private static func decodeImageResponse(from queryItems: [URLQueryItem]) -> UnifiedResponse? {
+        var imageUrl: String?
         var prompt: String?
         var modelRaw: String?
         var timestamp: TimeInterval = Date().timeIntervalSince1970
         
         for item in queryItems {
             switch item.name {
+            case "imageUrl":
+                imageUrl = item.value
             case "prompt":
                 prompt = item.value
             case "model":
@@ -184,8 +188,11 @@ class MessageHelper {
             return nil
         }
         
+        // Use the actual imageUrl if available, otherwise use placeholder
+        let finalImageUrl = imageUrl ?? "mock://placeholder"
+        
         let imageResponse = ImageResponse(
-            imageUrl: "mock://placeholder",
+            imageUrl: finalImageUrl,
             prompt: prompt,
             model: model,
             timestamp: timestamp
