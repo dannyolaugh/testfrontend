@@ -48,23 +48,6 @@ struct ImageResponseCard: View {
                     )
             }
             
-            // Prompt
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Prompt")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(AppTheme.textSecondary)
-                    .textCase(.uppercase)
-                
-                Text(imageResponse.prompt)
-                    .font(.system(size: 13))
-                    .foregroundColor(AppTheme.textPrimary)
-                    .lineLimit(3)
-            }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AppTheme.backgroundGray)
-            .cornerRadius(6)
-            
             // Action buttons
             HStack(spacing: 8) {
                 // Save button

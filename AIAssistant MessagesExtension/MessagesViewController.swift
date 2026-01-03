@@ -4,185 +4,295 @@ import SwiftUI
 
 class MessagesViewController: MSMessagesAppViewController {
     
-    private var hostingController: UIHostingController<MainView>?
-    private var detailController: UIHostingController<AnyView>?
-    private var shouldStayExpanded = false
+    private var hostingController: UIHostingController<AnyView>?
+    private var currentGenerationMode: GenerationMode = .text // Preserve mode
+    private var currentQuestion: String = "" // Preserve question
+    private var shouldRefocusTextField = false // Track if we need to refocus after expansion
+    
+    // Preserve selected models
+    private var currentTextModel: AIModel = .claude
+    private var currentImageModel: ImageModel = .dalle
+    
+    // Preserve responses
+    private var currentTextResponse: AIResponse?
+    private var currentImageResponse: ImageResponse?
+    private var currentGeneratedImage: UIImage?
+    
+    // Track loading state
+    private var isGenerating = false
+    private var currentGenerationTask: Task<Void, Never>?
+    
+    // Track if we're currently showing a detail view
+    private var isShowingDetailView = false
     
     override func viewDidLoad() {
         super.viewDidLoad()
         print("📱 viewDidLoad")
     }
     
+    // MARK: - Core Lifecycle Methods
+    
     override func willBecomeActive(with conversation: MSConversation) {
         super.willBecomeActive(with: conversation)
-        print("📱 willBecomeActive - selectedMessage: \(conversation.selectedMessage != nil)")
+        print("📱 willBecomeActive - presentationStyle: \(presentationStyle.rawValue)")
         
-        // Only setup main view if we don't have any controller
-        if hostingController == nil && detailController == nil {
-            print("📱 No controllers found, setting up main view")
-            setupView()
-        }
+        // Present the appropriate view based on presentation style
+        presentViewController(for: conversation, with: presentationStyle)
     }
     
-    override func didBecomeActive(with conversation: MSConversation) {
-        super.didBecomeActive(with: conversation)
-        // Don't do anything here that would trigger message insertion
+    override func didTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
+        super.didTransition(to: presentationStyle)
+        print("📱 didTransition to: \(presentationStyle.rawValue)")
+        
+        guard let conversation = activeConversation else { return }
+        
+        // Update view based on new presentation style
+        presentViewController(for: conversation, with: presentationStyle)
     }
     
     override func didSelect(_ message: MSMessage, conversation: MSConversation) {
-        print("📱 didSelect called")
+        print("📱 didSelect - message selected")
         
-        guard let url = message.url,
-              let unifiedResponse = MessageHelper.decodeResponseFromURL(url: url) else {
-            print("❌ Failed to decode message URL")
+        // When a message is selected, expand to full screen
+        requestPresentationStyle(.expanded)
+    }
+    
+    override func didResignActive(with conversation: MSConversation) {
+        super.didResignActive(with: conversation)
+        print("📱 didResignActive")
+    }
+    
+    // MARK: - View Presentation Logic
+    
+    private func presentViewController(for conversation: MSConversation, with presentationStyle: MSMessagesAppPresentationStyle) {
+        print("📱 presentViewController - style: \(presentationStyle.rawValue), selectedMessage: \(conversation.selectedMessage != nil), isShowingDetailView: \(isShowingDetailView)")
+        
+        // SPECIAL CASE: If we're going to compact mode, a message is selected,
+        // AND we were showing a detail view, it means user swiped down. Dismiss entirely.
+        if presentationStyle == .compact && conversation.selectedMessage != nil && isShowingDetailView {
+            print("📱 User swiped down on detail view - dismissing extension entirely")
+            isShowingDetailView = false
+            dismiss()
             return
         }
         
-        print("✅ Decoded response, showing detail view")
+        // Clean up existing view
+        cleanupView()
         
-        // For image responses, get the image from the message layout first
-        // Then download from URL if needed
+        // Decision tree based on GamePigeon pattern:
+        // - Compact mode: ALWAYS show main view (selection UI)
+        // - Expanded mode with selected message: Show detail view
+        // - Expanded mode without selected message: Show main view
+        
+        if presentationStyle == .compact {
+            // Compact = main/selection view (like GamePigeon game selection)
+            print("📱 Presenting main view (compact)")
+            isShowingDetailView = false
+            presentMainView(conversation: conversation)
+        } else {
+            // Expanded mode
+            if let selectedMessage = conversation.selectedMessage {
+                // Message is selected - show the detail view
+                print("📱 Presenting detail view (expanded with message)")
+                isShowingDetailView = true
+                presentDetailView(for: selectedMessage, conversation: conversation)
+            } else {
+                // No message selected - show main view
+                print("📱 Presenting main view (expanded, no message)")
+                isShowingDetailView = false
+                presentMainView(conversation: conversation)
+            }
+        }
+    }
+    
+    // MARK: - Main View
+    
+    private func presentMainView(conversation: MSConversation) {
+        print("📱 Creating main view with mode: \(currentGenerationMode.rawValue), shouldRefocus: \(shouldRefocusTextField)")
+        
+        let mainView = MainView(
+            initialMode: currentGenerationMode,
+            initialQuestion: currentQuestion,
+            initialTextModel: currentTextModel,
+            initialImageModel: currentImageModel,
+            initialTextResponse: currentTextResponse,
+            initialImageResponse: currentImageResponse,
+            initialGeneratedImage: currentGeneratedImage,
+            isLoading: isGenerating,
+            shouldFocusTextField: shouldRefocusTextField,
+            onSendText: { [weak self] response in
+                self?.sendTextMessage(response: response, conversation: conversation)
+            },
+            onSendImage: { [weak self] imageResponse, image in
+                self?.sendImageMessage(imageResponse: imageResponse, image: image, conversation: conversation)
+            },
+            onQuerySubmitted: { [weak self] in
+                // Expand when user taps text field in compact mode
+                if self?.presentationStyle == .compact {
+                    self?.shouldRefocusTextField = true
+                    self?.requestPresentationStyle(.expanded)
+                }
+            },
+            onGenerate: { [weak self] question, mode, textModel, imageModel in
+                // Handle generation at view controller level
+                self?.generateContent(question: question, mode: mode, textModel: textModel, imageModel: imageModel, conversation: conversation)
+            },
+            onResponseReceived: { },
+            onStateChanged: { [weak self] mode, question in
+                // Preserve state when it changes
+                self?.currentGenerationMode = mode
+                self?.currentQuestion = question
+            },
+            onModelChanged: { [weak self] textModel, imageModel in
+                // Preserve model selections
+                self?.currentTextModel = textModel
+                self?.currentImageModel = imageModel
+            },
+            onResponseStateChanged: { [weak self] textResponse, imageResponse, image in
+                // Preserve responses when they change
+                self?.currentTextResponse = textResponse
+                self?.currentImageResponse = imageResponse
+                self?.currentGeneratedImage = image
+            }
+        )
+        
+        // Reset refocus flag after creating view
+        shouldRefocusTextField = false
+        
+        let controller = UIHostingController(rootView: AnyView(mainView))
+        controller.view.backgroundColor = .white
+        
+        addChild(controller)
+        controller.view.frame = view.bounds
+        controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(controller.view)
+        controller.didMove(toParent: self)
+        
+        hostingController = controller
+        print("📱 Main view presented")
+    }
+    
+    // MARK: - Detail View
+    
+    private func presentDetailView(for message: MSMessage, conversation: MSConversation) {
+        print("📱 Creating detail view for message")
+        
+        guard let url = message.url,
+              let unifiedResponse = MessageHelper.decodeResponseFromURL(url: url) else {
+            print("❌ Failed to decode message URL - showing main view")
+            presentMainView(conversation: conversation)
+            return
+        }
+        
+        // Handle image responses - need to get image data
         if unifiedResponse.type == .image,
            let imageResponse = unifiedResponse.imageResponse {
             
-            // First try to get image from message layout
+            // Try to get image from message layout first
             if let layoutImage = MessageHelper.decodeImageFromMessage(message: message) {
                 let imageData = layoutImage.jpegData(compressionQuality: 1.0)
                 let updatedResponse = UnifiedResponse(imageResponse: imageResponse, imageData: imageData)
-                showDetailView(for: updatedResponse, conversation: conversation)
+                showDetailContent(for: updatedResponse, conversation: conversation)
             } else if imageResponse.imageUrl != "mock://placeholder" {
-                // If no layout image but we have a URL, download it
-                print("📥 Downloading image from URL: \(imageResponse.imageUrl)")
+                // Download image if not in layout
+                print("📥 Downloading image from URL")
+                showLoadingView()
+                
                 Task {
                     do {
                         let imageData = try await APIService.downloadImage(from: imageResponse.imageUrl)
                         let updatedResponse = UnifiedResponse(imageResponse: imageResponse, imageData: imageData)
                         
                         await MainActor.run {
-                            self.showDetailView(for: updatedResponse, conversation: conversation)
+                            self.showDetailContent(for: updatedResponse, conversation: conversation)
                         }
                     } catch {
                         print("❌ Failed to download image: \(error)")
                         await MainActor.run {
-                            // Show error or fallback
-                            self.showImageLoadError()
+                            self.presentMainView(conversation: conversation)
                         }
                     }
                 }
             } else {
                 print("❌ No image data available")
+                presentMainView(conversation: conversation)
             }
         } else {
-            showDetailView(for: unifiedResponse, conversation: conversation)
+            // Text response - show immediately
+            showDetailContent(for: unifiedResponse, conversation: conversation)
         }
     }
     
-    private func showImageLoadError() {
-        // You could show an alert here
-        print("⚠️ Unable to load image")
-    }
-    
-    private func showDetailView(for unifiedResponse: UnifiedResponse, conversation: MSConversation) {
-        print("📱 showDetailView called for type: \(unifiedResponse.type)")
-        
-        // Clear BOTH controllers before showing detail
-        if let existing = hostingController {
-            print("📱 Clearing existing main view controller")
-            existing.view.removeFromSuperview()
-            existing.removeFromParent()
-            hostingController = nil
-        }
-        
-        if let existing = detailController {
-            print("📱 Clearing existing detail view controller")
-            existing.view.removeFromSuperview()
-            existing.removeFromParent()
-            detailController = nil
-        }
+    private func showDetailContent(for unifiedResponse: UnifiedResponse, conversation: MSConversation) {
+        print("📱 Showing detail content for type: \(unifiedResponse.type)")
         
         let detailView: AnyView
         
         if unifiedResponse.type == .text, let textResponse = unifiedResponse.textResponse {
-            detailView = AnyView(ResponseDetailView(response: textResponse, onDismiss: { [weak self] in
-                self?.dismissDetailView(conversation: conversation)
-            }))
+            detailView = AnyView(
+                ResponseDetailView(
+                    response: textResponse,
+                    onDismiss: { [weak self] in
+                        print("📱 Detail view dismissed - dismissing entire extension")
+                        // Dismiss the entire extension
+                        self?.dismiss()
+                    }
+                )
+                .interactiveDismissDisabled(false) // Allow swipe to dismiss
+            )
         } else if unifiedResponse.type == .image,
                   let imageResponse = unifiedResponse.imageResponse,
                   let imageData = unifiedResponse.imageData,
                   let image = UIImage(data: imageData) {
-            detailView = AnyView(ImageDetailView(imageResponse: imageResponse, image: image, onDismiss: { [weak self] in
-                self?.dismissDetailView(conversation: conversation)
-            }))
+            detailView = AnyView(
+                ImageDetailView(
+                    imageResponse: imageResponse,
+                    image: image,
+                    onDismiss: { [weak self] in
+                        print("📱 Detail view dismissed - dismissing entire extension")
+                        // Dismiss the entire extension
+                        self?.dismiss()
+                    }
+                )
+                .interactiveDismissDisabled(false) // Allow swipe to dismiss
+            )
         } else {
             print("❌ Invalid unified response")
+            presentMainView(conversation: conversation)
             return
         }
         
         let controller = UIHostingController(rootView: detailView)
         controller.view.backgroundColor = .white
         
+        // Important: Set presentation style to allow swipe-to-dismiss
+        controller.modalPresentationStyle = .automatic
+        
         addChild(controller)
         controller.view.frame = view.bounds
         controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(controller.view)
         controller.didMove(toParent: self)
         
-        self.detailController = controller
-        print("📱 Detail controller set and displayed")
+        hostingController = controller
+        print("📱 Detail content displayed")
     }
     
-    private func dismissDetailView(conversation: MSConversation) {
-        print("📱 Detail view onDismiss called")
-        
-        // Clear detail controller
-        detailController?.view.removeFromSuperview()
-        detailController?.removeFromParent()
-        detailController = nil
-        
-        // Don't try to deselect the message as it can cause issues
-        // Just recreate the main view
-        setupView()
-        
-        print("📱 Requesting compact presentation style")
-        shouldStayExpanded = false
-        requestPresentationStyle(.compact)
-    }
-    
-    override func willTransition(to presentationStyle: MSMessagesAppPresentationStyle) {
-        if shouldStayExpanded && presentationStyle == .compact {
-            return
-        }
-        
-        super.willTransition(to: presentationStyle)
-    }
-    
-    private func setupView() {
-        print("📱 setupView called")
-        
-        // Clear any existing controller
-        hostingController?.view.removeFromSuperview()
-        hostingController?.removeFromParent()
-        hostingController = nil
-        
-        print("📱 Creating main view")
-        
-        let mainView = MainView(
-            onSendText: { [weak self] response in
-                self?.sendTextMessage(response: response)
-            },
-            onSendImage: { [weak self] imageResponse, image in
-                self?.sendImageMessage(imageResponse: imageResponse, image: image)
-            },
-            onQuerySubmitted: { [weak self] in
-                self?.shouldStayExpanded = true
-                self?.requestPresentationStyle(.expanded)
-            },
-            onResponseReceived: { [weak self] in
-                self?.shouldStayExpanded = true
+    private func showLoadingView() {
+        let loadingView = AnyView(
+            VStack {
+                ProgressView()
+                    .scaleEffect(1.5)
+                Text("Loading...")
+                    .font(.system(size: 16))
+                    .foregroundColor(.gray)
+                    .padding(.top, 16)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.white)
         )
         
-        let controller = UIHostingController(rootView: mainView)
+        let controller = UIHostingController(rootView: loadingView)
         controller.view.backgroundColor = .white
         
         addChild(controller)
@@ -191,89 +301,224 @@ class MessagesViewController: MSMessagesAppViewController {
         view.addSubview(controller.view)
         controller.didMove(toParent: self)
         
-        self.hostingController = controller
+        hostingController = controller
     }
     
-    private func sendTextMessage(response: AIResponse) {
-        guard let conversation = activeConversation else { return }
+    private func cleanupView() {
+        hostingController?.view.removeFromSuperview()
+        hostingController?.removeFromParent()
+        hostingController = nil
+    }
+    
+    // MARK: - Message Sending
+    
+    private func generateContent(question: String, mode: GenerationMode, textModel: AIModel, imageModel: ImageModel, conversation: MSConversation) {
+        print("📱 Starting generation at controller level")
+        
+        // Cancel any existing task
+        currentGenerationTask?.cancel()
+        
+        isGenerating = true
+        
+        // Recreate view to show loading state
+        presentMainView(conversation: conversation)
+        
+        if mode == .text {
+            currentGenerationTask = Task { [weak self] in
+                do {
+                    let result = try await APIService.askAI(
+                        question: question,
+                        model: textModel,
+                        userId: UIDevice.current.identifierForVendor?.uuidString
+                    )
+                    
+                    guard !Task.isCancelled else { return }
+                    
+                    await MainActor.run { [weak self] in
+                        guard let self = self else { return }
+                        self.currentTextResponse = result
+                        self.isGenerating = false
+                        self.currentGenerationTask = nil
+                        // Keep question so user can query again or try different model
+                        // Recreate view with response
+                        self.presentMainView(conversation: conversation)
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    
+                    await MainActor.run { [weak self] in
+                        guard let self = self else { return }
+                        print("❌ Generation error: \(error)")
+                        self.isGenerating = false
+                        self.currentGenerationTask = nil
+                        // Keep question so user can retry
+                        // Recreate view to clear loading state
+                        self.presentMainView(conversation: conversation)
+                    }
+                }
+            }
+        } else {
+            currentGenerationTask = Task { [weak self] in
+                do {
+                    print("🎨 Starting real image generation with DALL-E 3")
+                    
+                    let imgResponse = try await APIService.generateImage(
+                        prompt: question,
+                        userId: UIDevice.current.identifierForVendor?.uuidString
+                    )
+                    
+                    guard !Task.isCancelled else { return }
+                    
+                    print("✅ Image generation API call successful, imageUrl: \(imgResponse.imageUrl)")
+                    
+                    let imageData = try await APIService.downloadImage(from: imgResponse.imageUrl)
+                    
+                    guard !Task.isCancelled else { return }
+                    
+                    guard let image = UIImage(data: imageData) else {
+                        throw APIError.decodingError
+                    }
+                    
+                    print("✅ Image downloaded and converted to UIImage")
+                    
+                    await MainActor.run { [weak self] in
+                        guard let self = self else { return }
+                        self.currentImageResponse = imgResponse
+                        self.currentGeneratedImage = image
+                        self.isGenerating = false
+                        self.currentGenerationTask = nil
+                        // Keep question so user can query again or try different model
+                        // Recreate view with response
+                        self.presentMainView(conversation: conversation)
+                    }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    
+                    await MainActor.run { [weak self] in
+                        guard let self = self else { return }
+                        print("❌ Image generation failed: \(error)")
+                        self.isGenerating = false
+                        self.currentGenerationTask = nil
+                        // Keep question so user can retry
+                        // Recreate view to clear loading state
+                        self.presentMainView(conversation: conversation)
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Message Sending
+    
+    private func sendTextMessage(response: AIResponse, conversation: MSConversation) {
+        print("📱 Sending text message")
         
         let richMessage = MessageHelper.createMessage(response: response, conversation: conversation)
         
-        // Insert the message properly
         conversation.insert(richMessage) { error in
             if let error = error {
                 print("❌ Error inserting rich message: \(error)")
             } else {
                 print("✅ Rich message card sent successfully")
-                
-                // Also send plain text version
-                let plainText = "\(response.model.displayName): \(response.text)"
-                conversation.insertText(plainText) { textError in
-                    if let textError = textError {
-                        print("❌ Error sending text: \(textError)")
-                    } else {
-                        print("✅ Plain text message sent successfully")
-                    }
-                }
             }
         }
         
-        self.shouldStayExpanded = false
-        self.requestPresentationStyle(.compact)
+        // Clear the response after sending
+        currentTextResponse = nil
+        
+        // Collapse after sending
+        requestPresentationStyle(.compact)
     }
     
-    private func sendImageMessage(imageResponse: ImageResponse, image: UIImage) {
-        guard let conversation = activeConversation else { return }
+    private func sendImageMessage(imageResponse: ImageResponse, image: UIImage, conversation: MSConversation) {
+        print("📱 Sending image message")
         
-        print("🖼️ Sending image message")
+        let message = MessageHelper.createImageMessage(
+            imageResponse: imageResponse,
+            image: image,
+            conversation: conversation
+        )
         
-        // Create the rich message card with the image (now includes imageUrl in URL)
-        let message = MessageHelper.createImageMessage(imageResponse: imageResponse, image: image, conversation: conversation)
-        
-        // Insert the rich message
         conversation.insert(message) { error in
             if let error = error {
                 print("❌ Error inserting image message: \(error)")
             } else {
                 print("✅ Image message card sent successfully")
-                
-                // Also insert text describing the image so it appears in the text field
-                let imageDescription = "🎨 \(imageResponse.model.displayName) generated: \(imageResponse.prompt)"
-                conversation.insertText(imageDescription) { textError in
-                    if let textError = textError {
-                        print("❌ Error sending image description text: \(textError)")
-                    } else {
-                        print("✅ Image description text sent successfully")
-                    }
-                }
             }
         }
         
-        self.shouldStayExpanded = false
-        self.requestPresentationStyle(.compact)
+        // Clear the responses after sending
+        currentImageResponse = nil
+        currentGeneratedImage = nil
+        
+        // Collapse after sending
+        requestPresentationStyle(.compact)
     }
 }
 
 // MARK: - Main View
 
 struct MainView: View {
-    @State private var generationMode: GenerationMode = .text
-    @State private var question: String = ""
-    @State private var selectedTextModel: AIModel = .claude
-    @State private var selectedImageModel: ImageModel = .dalle
+    @State private var generationMode: GenerationMode
+    @State private var question: String
+    @State private var selectedTextModel: AIModel
+    @State private var selectedImageModel: ImageModel
     @State private var textResponse: AIResponse?
     @State private var imageResponse: ImageResponse?
     @State private var generatedImage: UIImage?
-    @State private var isLoading = false
+    let isLoading: Bool // Now comes from controller
     @State private var errorMessage: String?
     @State private var showingDetail = false
     @State private var detailResponse: AIResponse?
     @FocusState private var isInputFocused: Bool
     
+    let shouldFocusTextField: Bool
     let onSendText: (AIResponse) -> Void
     let onSendImage: (ImageResponse, UIImage) -> Void
     let onQuerySubmitted: () -> Void
+    let onGenerate: (String, GenerationMode, AIModel, ImageModel) -> Void
     let onResponseReceived: () -> Void
+    let onStateChanged: (GenerationMode, String) -> Void
+    let onModelChanged: (AIModel, ImageModel) -> Void
+    let onResponseStateChanged: (AIResponse?, ImageResponse?, UIImage?) -> Void
+    
+    init(
+        initialMode: GenerationMode = .text,
+        initialQuestion: String = "",
+        initialTextModel: AIModel = .claude,
+        initialImageModel: ImageModel = .dalle,
+        initialTextResponse: AIResponse? = nil,
+        initialImageResponse: ImageResponse? = nil,
+        initialGeneratedImage: UIImage? = nil,
+        isLoading: Bool = false,
+        shouldFocusTextField: Bool = false,
+        onSendText: @escaping (AIResponse) -> Void,
+        onSendImage: @escaping (ImageResponse, UIImage) -> Void,
+        onQuerySubmitted: @escaping () -> Void,
+        onGenerate: @escaping (String, GenerationMode, AIModel, ImageModel) -> Void,
+        onResponseReceived: @escaping () -> Void,
+        onStateChanged: @escaping (GenerationMode, String) -> Void,
+        onModelChanged: @escaping (AIModel, ImageModel) -> Void,
+        onResponseStateChanged: @escaping (AIResponse?, ImageResponse?, UIImage?) -> Void
+    ) {
+        _generationMode = State(initialValue: initialMode)
+        _question = State(initialValue: initialQuestion)
+        _selectedTextModel = State(initialValue: initialTextModel)
+        _selectedImageModel = State(initialValue: initialImageModel)
+        _textResponse = State(initialValue: initialTextResponse)
+        _imageResponse = State(initialValue: initialImageResponse)
+        _generatedImage = State(initialValue: initialGeneratedImage)
+        self.isLoading = isLoading
+        self.shouldFocusTextField = shouldFocusTextField
+        self.onSendText = onSendText
+        self.onSendImage = onSendImage
+        self.onQuerySubmitted = onQuerySubmitted
+        self.onGenerate = onGenerate
+        self.onResponseReceived = onResponseReceived
+        self.onStateChanged = onStateChanged
+        self.onModelChanged = onModelChanged
+        self.onResponseStateChanged = onResponseStateChanged
+    }
     
     func showDetailView(for response: AIResponse) {
         detailResponse = response
@@ -310,17 +555,23 @@ struct MainView: View {
                     VStack(spacing: 16) {
                         // Generation Mode Selector
                         GenerationModeSelector(selectedMode: $generationMode)
-                            .onChange(of: generationMode) { _ in
-                                textResponse = nil
-                                imageResponse = nil
-                                generatedImage = nil
+                            .onChange(of: generationMode) { newMode in
+                                // Only clear the response for the mode we're switching FROM
+                                // This preserves responses when switching tabs
+                                onStateChanged(newMode, question)
                             }
                         
                         // Model Selection
                         if generationMode == .text {
                             ModelSelectionView(selectedModel: $selectedTextModel)
+                                .onChange(of: selectedTextModel) { newModel in
+                                    onModelChanged(newModel, selectedImageModel)
+                                }
                         } else {
                             ImageModelSelectionView(selectedModel: $selectedImageModel)
+                                .onChange(of: selectedImageModel) { newModel in
+                                    onModelChanged(selectedTextModel, newModel)
+                                }
                         }
                         
                         // Input Area
@@ -333,6 +584,7 @@ struct MainView: View {
                                 )
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 15))
+                                .foregroundColor(AppTheme.textPrimary) // Force dark text color
                                 .lineLimit(1...6)
                                 .focused($isInputFocused)
                                 .onChange(of: isInputFocused) { focused in
@@ -340,9 +592,15 @@ struct MainView: View {
                                         onQuerySubmitted()
                                     }
                                 }
+                                .onChange(of: question) { newQuestion in
+                                    onStateChanged(generationMode, newQuestion)
+                                }
                                 
                                 if !question.isEmpty {
-                                    Button(action: { question = "" }) {
+                                    Button(action: {
+                                        question = ""
+                                        onStateChanged(generationMode, "")
+                                    }) {
                                         Image(systemName: "xmark.circle.fill")
                                             .foregroundColor(AppTheme.textSecondary)
                                             .font(.system(size: 16))
@@ -373,7 +631,11 @@ struct MainView: View {
                                 
                                 Spacer()
                                 
-                                Button(action: generateContent) {
+                                Button(action: {
+                                    // Call controller-level generation
+                                    onGenerate(question, generationMode, selectedTextModel, selectedImageModel)
+                                    isInputFocused = false
+                                }) {
                                     HStack(spacing: 6) {
                                         Image(systemName: generationMode.icon)
                                             .font(.system(size: 12))
@@ -424,40 +686,45 @@ struct MainView: View {
                             )
                         }
                         
-                        // Response Cards
-                        if let response = textResponse {
-                            SimpleResponseCard(
-                                response: response,
-                                availableHeight: geometry.size.height - 350,
-                                onSend: {
-                                    onSendText(response)
-                                    self.textResponse = nil
-                                },
-                                onViewFull: {
-                                    showDetailView(for: response)
-                                }
-                            )
-                        }
-                        
-                        if let imageResp = imageResponse {
-                            ImageResponseCard(
-                                imageResponse: imageResp,
-                                image: generatedImage,
-                                availableHeight: geometry.size.height - 350,
-                                onSend: {
-                                    if let img = generatedImage {
-                                        onSendImage(imageResp, img)
-                                        self.imageResponse = nil
-                                        self.generatedImage = nil
+                        // Response Cards - only show responses for the current mode
+                        if generationMode == .text {
+                            if let response = textResponse {
+                                SimpleResponseCard(
+                                    response: response,
+                                    availableHeight: geometry.size.height - 350,
+                                    onSend: {
+                                        onSendText(response)
+                                        self.textResponse = nil
+                                        onResponseStateChanged(nil, imageResponse, generatedImage)
+                                    },
+                                    onViewFull: {
+                                        showDetailView(for: response)
                                     }
-                                }
-                            )
+                                )
+                            }
+                        } else {
+                            if let imageResp = imageResponse {
+                                ImageResponseCard(
+                                    imageResponse: imageResp,
+                                    image: generatedImage,
+                                    availableHeight: geometry.size.height - 350,
+                                    onSend: {
+                                        if let img = generatedImage {
+                                            onSendImage(imageResp, img)
+                                            self.imageResponse = nil
+                                            self.generatedImage = nil
+                                            onResponseStateChanged(textResponse, nil, nil)
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                     .padding(16)
                 }
             }
             .background(Color.white)
+            .preferredColorScheme(.light) // Force light mode
             .sheet(isPresented: $showingDetail) {
                 if let response = detailResponse {
                     ResponseDetailView(response: response, onDismiss: {
@@ -470,76 +737,17 @@ struct MainView: View {
                     detailResponse = nil
                 }
             }
+            .onAppear {
+                // Auto-focus text field if requested (after expansion)
+                if shouldFocusTextField {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        isInputFocused = true
+                    }
+                }
+            }
         }
     }
     
-    private func generateContent() {
-        isLoading = true
-        errorMessage = nil
-        isInputFocused = false
-        
-        if generationMode == .text {
-            Task {
-                do {
-                    let result = try await APIService.askAI(
-                        question: question,
-                        model: selectedTextModel,
-                        userId: UIDevice.current.identifierForVendor?.uuidString
-                    )
-                    
-                    await MainActor.run {
-                        self.textResponse = result
-                        self.isLoading = false
-                        self.question = ""
-                        onResponseReceived()
-                    }
-                } catch {
-                    await MainActor.run {
-                        self.errorMessage = "Couldn't get a response. Please try again."
-                        self.isLoading = false
-                    }
-                }
-            }
-        } else {
-            // Real image generation with DALL-E 3
-            Task {
-                do {
-                    print("🎨 Starting real image generation with DALL-E 3")
-                    
-                    // Call the API to generate the image
-                    let imgResponse = try await APIService.generateImage(
-                        prompt: question,
-                        userId: UIDevice.current.identifierForVendor?.uuidString
-                    )
-                    
-                    print("✅ Image generation API call successful, imageUrl: \(imgResponse.imageUrl)")
-                    
-                    // Download the generated image
-                    let imageData = try await APIService.downloadImage(from: imgResponse.imageUrl)
-                    
-                    guard let image = UIImage(data: imageData) else {
-                        throw APIError.decodingError
-                    }
-                    
-                    print("✅ Image downloaded and converted to UIImage")
-                    
-                    await MainActor.run {
-                        self.imageResponse = imgResponse
-                        self.generatedImage = image
-                        self.isLoading = false
-                        self.question = ""
-                        onResponseReceived()
-                    }
-                } catch {
-                    print("❌ Image generation failed: \(error)")
-                    await MainActor.run {
-                        self.errorMessage = "Couldn't generate image. Please try again."
-                        self.isLoading = false
-                    }
-                }
-            }
-        }
-    }
 }
 
 // MARK: - Simple Response Card

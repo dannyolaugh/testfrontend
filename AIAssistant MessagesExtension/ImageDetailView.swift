@@ -38,31 +38,6 @@ struct ImageDetailView: View {
                         .cornerRadius(8)
                         .padding(.horizontal)
                     
-                    // Prompt Section
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Prompt")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(AppTheme.textSecondary)
-                                .textCase(.uppercase)
-                            
-                            Spacer()
-                        }
-                        .padding(.horizontal)
-                        
-                        Text(imageResponse.prompt)
-                            .font(.system(size: 15))
-                            .foregroundColor(AppTheme.textPrimary)
-                            .lineSpacing(4)
-                            .padding(.horizontal)
-                            .padding(.vertical, 12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppTheme.backgroundGray)
-                            .cornerRadius(6)
-                            .padding(.horizontal)
-                    }
-                    .padding(.top, 8)
-                    
                     // Action Buttons
                     VStack(spacing: 12) {
                         Button(action: {
@@ -103,6 +78,7 @@ struct ImageDetailView: View {
                     }
                     .padding(.horizontal)
                     .padding(.bottom, 20)
+                    .padding(.top, 8)
                 }
                 .padding(.vertical)
             }
