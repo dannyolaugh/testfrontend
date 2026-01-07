@@ -530,12 +530,12 @@ struct MainView: View {
             VStack(spacing: 0) {
                 // Header
                 HStack {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(AppTheme.slackPurple)
                     
-                    Text("AI Assistant")
-                        .font(.system(size: 15, weight: .semibold))
+                    Text("🐓")
+                        .font(.system(size: 16))
+                        
+                    Text("Bantam AI")
+                        .font(.system(size: 15, weight: .heavy, design: .rounded))
                         .foregroundColor(AppTheme.textPrimary)
                     
                     Spacer()

@@ -243,13 +243,13 @@ struct ResponsePreview: View {
             
             // Action buttons
             HStack(spacing: 8) {
-                // View full button - only show if there are citations or if NOT expanded
-                if let onViewFull = onViewFull, (!isExpanded || !response.citations.isEmpty) {
+                // View full button - always show if callback is available
+                if let onViewFull = onViewFull {
                     Button(action: onViewFull) {
                         HStack {
                             Image(systemName: "eye")
                                 .font(.system(size: 12))
-                            Text(isExpanded ? "View Citations" : "View Full")
+                            Text("View Full")
                                 .font(.system(size: 14, weight: .semibold))
                         }
                         .foregroundColor(AppTheme.modelColor(for: response.model))

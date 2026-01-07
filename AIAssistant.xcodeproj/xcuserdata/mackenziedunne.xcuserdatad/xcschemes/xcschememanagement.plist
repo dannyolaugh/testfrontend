@@ -13,6 +13,8 @@
 		</dict>
 		<key>AIAssistant.xcscheme_^#shared#^_</key>
 		<dict>
+			<key>isShown</key>
+			<true/>
 			<key>orderHint</key>
 			<integer>1</integer>
 		</dict>
