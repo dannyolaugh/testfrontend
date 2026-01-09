@@ -816,7 +816,7 @@ struct SimpleResponseCard: View {
                         )
                     }
                     
-                    if !response.citations.isEmpty {
+                    //if !response.citations.isEmpty {
                         Button(action: onViewFull) {
                             HStack {
                                 Image(systemName: "eye")
@@ -834,7 +834,7 @@ struct SimpleResponseCard: View {
                                     .stroke(AppTheme.modelColor(for: response.model).opacity(0.3), lineWidth: 1)
                             )
                         }
-                    }
+                    //}
                 }
                 
                 Button(action: onSend) {
