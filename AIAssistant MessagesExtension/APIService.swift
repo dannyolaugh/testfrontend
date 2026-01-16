@@ -66,7 +66,7 @@ class APIService {
     }
     
     static func generateImage(prompt: String, userId: String?) async throws -> ImageResponse {
-        print("🎨 Starting image generation with DALL-E 3")
+        print("🎨 Starting image generation with GPT Image 1")
         
         guard let url = URL(string: "\(baseURL)/generate-image") else {
             throw APIError.invalidURL
@@ -75,7 +75,7 @@ class APIService {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 60.0  // DALL-E 3 is typically fast (10-15 seconds)
+        request.timeoutInterval = 60.0  // GPT Image 1 timeout
         
         let requestBody: [String: Any] = [
             "prompt": prompt,
@@ -120,11 +120,29 @@ class APIService {
     }
     
     static func downloadImage(from urlString: String) async throws -> Data {
+        print("📥 Downloading image from: \(urlString.prefix(100))...") // Truncate for logging
+        
+        // Check if it's a data URL (base64 encoded)
+        if urlString.hasPrefix("data:image") {
+            // Extract base64 data from data URL
+            // Format: data:image/png;base64,<base64-data>
+            guard let base64Range = urlString.range(of: "base64,") else {
+                throw APIError.invalidURL
+            }
+            
+            let base64String = String(urlString[base64Range.upperBound...])
+            guard let imageData = Data(base64Encoded: base64String) else {
+                throw APIError.decodingError
+            }
+            
+            print("✅ Image decoded from base64, size: \(imageData.count) bytes")
+            return imageData
+        }
+        
+        // Regular URL download (fallback for backwards compatibility)
         guard let url = URL(string: urlString) else {
             throw APIError.invalidURL
         }
-        
-        print("📥 Downloading image from: \(urlString)")
         
         let (data, response) = try await session.data(from: url)
         

@@ -529,19 +529,26 @@ struct MainView: View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
                 // Header
-                HStack {
+                HStack(spacing: 4) {
                     
-                    Text("🐓")
-                        .font(.system(size: 16))
-                        
+                    Image("BantamLogo")
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 30, height: 30)
+                       
+                    
                     Text("Bantam AI")
-                        .font(.system(size: 15, weight: .heavy, design: .rounded))
+                        .font(.system(size: 15, weight: .bold, design: .default))
+                        .italic()
                         .foregroundColor(AppTheme.textPrimary)
+                    
+                    
                     
                     Spacer()
                 }
                 .padding(.horizontal, 16)
-                .padding(.vertical, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
                 .background(Color.white)
                 .overlay(
                     Rectangle()
